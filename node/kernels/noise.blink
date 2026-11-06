@@ -1,0 +1,55 @@
+// RayField: a tiling 3D noise for the haze's breakup, 64 x 64 x 64 voxels laid out as 8 x 8 tiles of 64 x 64 in a
+// 512 x 512 image (tile k = slice z). r and g are two independent smooth value noises, one lattice cell every
+// 8 voxels, from the integer hash, so they are the same on every machine. Depends only on the seed, so Nuke keeps it.
+// Mirrors reference.noise_atlas.
+kernel RFNoise : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessPoint, eEdgeClamped> space;
+  Image<eWrite> dst;
+
+  param:
+//@decl
+
+  void define() {
+//@define
+  }
+
+//@params seed
+//@include lib_hash
+
+  float fade5(float f) {
+    return f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+  }
+
+  float lattice(int c, int cx, int cy, int cz) {
+    int idx = cx + 8 * (cy + 8 * cz);
+    int2 h = hash_more(hash_more(hash_more(hash1(word(seed)), word(@NOISE@)), word(c)), word(idx));
+    return u01(h);
+  }
+
+  float value_noise(int c, int i, int j, int k) {
+    int cx = i / 8;
+    int cy = j / 8;
+    int cz = k / 8;
+    float wx = fade5(float(i % 8) / 8.0f);
+    float wy = fade5(float(j % 8) / 8.0f);
+    float wz = fade5(float(k % 8) / 8.0f);
+    int cx1 = (cx + 1) % 8;
+    int cy1 = (cy + 1) % 8;
+    int cz1 = (cz + 1) % 8;
+    float a = lattice(c, cx, cy, cz) * (1.0f - wx) + lattice(c, cx1, cy, cz) * wx;
+    float b = lattice(c, cx, cy1, cz) * (1.0f - wx) + lattice(c, cx1, cy1, cz) * wx;
+    float d = lattice(c, cx, cy, cz1) * (1.0f - wx) + lattice(c, cx1, cy, cz1) * wx;
+    float e = lattice(c, cx, cy1, cz1) * (1.0f - wx) + lattice(c, cx1, cy1, cz1) * wx;
+    return (a * (1.0f - wy) + b * wy) * (1.0f - wz) + (d * (1.0f - wy) + e * wy) * wz;
+  }
+
+  void process(int2 xy) {
+    int x = xy.x - space.bounds.x1;
+    int y = xy.y - space.bounds.y1;
+    int i = x % 64;
+    int j = y % 64;
+    int k = (y / 64) * 8 + x / 64;
+    dst() = float4(value_noise(0, i, j, k), value_noise(1, i, j, k), 0.0f, 0.0f);
+  }
+};

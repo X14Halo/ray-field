@@ -1,0 +1,149 @@
+// RayField: a few numbers about the set and the light, from a grid of samples of the surface image (4 x 1 out):
+//   pixel 0: the set's box (the camera and the clean surface the haze reaches): min x y z, and how many
+//            samples were in it
+//   pixel 1: the box's max x y z, and how far the haze reaches (scene units)
+//   pixel 2: the sun's light-map frame: u0, v0 and the size of one light-map pixel (scene units)
+// Mirrors reference.frame.
+kernel RFFrame : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessPoint, eEdgeClamped> space;
+  Image<eRead, eAccessRandom, eEdgeClamped> surf;
+  Image<eWrite> dst;
+
+  param:
+//@decl
+
+  local:
+    float Wf;
+    float Hf;
+    float3 Lfwd;
+    float3 Lright;
+    float3 Lup;
+    float3 Ltoward;
+    float3 Lpos;
+    float tanc;
+
+  void define() {
+//@define
+  }
+
+//@params cam_pos cam_right cam_up cam_back cam_th light_type aim light_az light_el roll light_dist cone su reach lm_n
+//@include lib_math
+//@include lib_cam
+//@include lib_light
+
+  void init() {
+    Wf = float(surf.bounds.width());
+    Hf = float(surf.bounds.height());
+    light_setup();
+  }
+
+  void process(int2 xy) {
+    int x0 = surf.bounds.x1;
+    int y0 = surf.bounds.y1;
+    // how far the set goes: the 95th percentile of the distances the camera sees (by bisection)
+    int gx = 96;
+    int gy = 54;
+    float maxd = 0.0f;
+    float n = 0.0f;
+    for (int j = 0; j < gy; j++) {
+      for (int i = 0; i < gx; i++) {
+        int sx = x0 + int((float(i) + 0.5f) * Wf / float(gx));
+        int sy = y0 + int((float(j) + 0.5f) * Hf / float(gy));
+        float4 s = surf(sx, sy);
+        if (s.y >= 0.5f && s.x > 0.0f) {
+          maxd = max(maxd, s.x);
+          n += 1.0f;
+        }
+      }
+    }
+    float autor = 20.0f / su;
+    if (n > 0.0f) {
+      float lo = 0.0f;
+      float hi = maxd;
+      for (int it = 0; it < 14; it++) {
+        float mid = 0.5f * (lo + hi);
+        float c = 0.0f;
+        for (int j = 0; j < gy; j++) {
+          for (int i = 0; i < gx; i++) {
+            int sx = x0 + int((float(i) + 0.5f) * Wf / float(gx));
+            int sy = y0 + int((float(j) + 0.5f) * Hf / float(gy));
+            float4 s = surf(sx, sy);
+            if (s.y >= 0.5f && s.x > 0.0f && s.x <= mid) {
+              c += 1.0f;
+            }
+          }
+        }
+        if (c >= 0.95f * n) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      autor = max(hi * 1.15f, 1.0f / su);
+    }
+    float rch = reach > 0.0f ? reach / su : autor;
+    if (xy.x == 3) {
+      dst() = float4(0.0f);
+      return;
+    }
+    // the box of the set, and the light-space extent of everything the camera's rays cross
+    gx = 192;
+    gy = 108;
+    float3 lo3 = float3(1e30f);
+    float3 hi3 = float3(-1e30f);
+    float npts = 0.0f;
+    float umin = 1e30f;
+    float umax = -1e30f;
+    float vmin = 1e30f;
+    float vmax = -1e30f;
+    for (int j = 0; j < gy; j++) {
+      for (int i = 0; i < gx; i++) {
+        int sx = x0 + int((float(i) + 0.5f) * Wf / float(gx));
+        int sy = y0 + int((float(j) + 0.5f) * Hf / float(gy));
+        float4 s = surf(sx, sy);
+        float3 d = ray_dir(float(sx - x0) + 0.5f, float(sy - y0) + 0.5f);
+        bool inbox = s.y >= 0.5f && s.x > 0.0f && s.x <= rch;
+        float3 P = cam_pos + d * (inbox ? s.x : rch);
+        if (inbox) {
+          lo3 = float3(min(lo3.x, P.x), min(lo3.y, P.y), min(lo3.z, P.z));
+          hi3 = float3(max(hi3.x, P.x), max(hi3.y, P.y), max(hi3.z, P.z));
+          npts += 1.0f;
+        }
+        float3 q = P - aim;
+        float lu = dot(q, Lright);
+        float lv = dot(q, Lup);
+        umin = min(umin, lu);
+        umax = max(umax, lu);
+        vmin = min(vmin, lv);
+        vmax = max(vmax, lv);
+      }
+    }
+    float3 qc = cam_pos - aim;
+    umin = min(umin, dot(qc, Lright));
+    umax = max(umax, dot(qc, Lright));
+    vmin = min(vmin, dot(qc, Lup));
+    vmax = max(vmax, dot(qc, Lup));
+    if (npts < 1.0f) {
+      lo3 = cam_pos - float3(5.0f / su);
+      hi3 = cam_pos + float3(5.0f / su);
+    }
+    // the air the camera looks through is part of the set
+    lo3 = float3(min(lo3.x, cam_pos.x), min(lo3.y, cam_pos.y), min(lo3.z, cam_pos.z));
+    hi3 = float3(max(hi3.x, cam_pos.x), max(hi3.y, cam_pos.y), max(hi3.z, cam_pos.z));
+    if (xy.x == 0) {
+      dst() = float4(lo3.x, lo3.y, lo3.z, npts);
+      return;
+    }
+    if (xy.x == 1) {
+      dst() = float4(hi3.x, hi3.y, hi3.z, rch);
+      return;
+    }
+    float ext = max(max(umax - umin, vmax - vmin), 0.1f / su);
+    float s_raw = ext / float(lm_n - 4);
+    float stp = pow(2.0f, ceil(log(s_raw) / log(2.0f) * 4.0f) / 4.0f);
+    float u0 = (floor(umin / stp) - 1.0f) * stp;
+    float v0 = (floor(vmin / stp) - 1.0f) * stp;
+    dst() = float4(u0, v0, stp, 0.0f);
+  }
+};

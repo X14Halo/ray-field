@@ -1,0 +1,109 @@
+  // ---- the light reaching a point: the light map's shadows, the cuc, the cone, falloff and fade
+  // (mirrors reference.Lighting). Needs images lmap and cuc, params lm_n light_type cone_soft distance falloff haze
+  // fade su cuc_size cuc_aspect cuc_outside, and lib_light.
+  int posmodi(int a, int m) {
+    int r = a % m;
+    return r < 0 ? r + m : r;
+  }
+  // light-map pixel coordinates of (lu, lv); lf = (u0, v0, step) of the sun's frame
+  float2 texel_of(float lu, float lv, float3 lf) {
+    if (light_type == 0) {
+      return float2((lu - lf.x) / lf.z, (lv - lf.y) / lf.z);
+    }
+    float n = float(lm_n);
+    return float2((lu * 0.5f + 0.5f) * n, (lv * 0.5f + 0.5f) * n);
+  }
+  // how much of the light gets to distance t along the light (bilinear over the light map's pixels)
+  float shadow_at(float tx, float ty, float t, float bias) {
+    float n = float(lm_n);
+    if (tx < 0.0f || ty < 0.0f || tx >= n || ty >= n) {
+      return 1.0f;
+    }
+    float fx = tx - 0.5f;
+    float fy = ty - 0.5f;
+    float x0f = floor(fx);
+    float y0f = floor(fy);
+    float ax = fx - x0f;
+    float ay = fy - y0f;
+    int x0 = int(x0f);
+    int y0 = int(y0f);
+    int xa = clampi(x0, 0, lm_n - 1);
+    int xb = clampi(x0 + 1, 0, lm_n - 1);
+    int ya = clampi(y0, 0, lm_n - 1);
+    int yb = clampi(y0 + 1, 0, lm_n - 1);
+    int bx = lmap.bounds.x1;
+    int by = lmap.bounds.y1;
+    float v00 = t < lmap(bx + xa, by + ya).x + bias ? 1.0f : 0.0f;
+    float v10 = t < lmap(bx + xb, by + ya).x + bias ? 1.0f : 0.0f;
+    float v01 = t < lmap(bx + xa, by + yb).x + bias ? 1.0f : 0.0f;
+    float v11 = t < lmap(bx + xb, by + yb).x + bias ? 1.0f : 0.0f;
+    return (v00 * (1.0f - ax) + v10 * ax) * (1.0f - ay) + (v01 * (1.0f - ax) + v11 * ax) * ay;
+  }
+  // where the light ray through this light-map pixel enters the set (1e20 = it misses it)
+  float entry_at(float tx, float ty) {
+    int xi = clampi(int(tx), 0, lm_n - 1);
+    int yi = clampi(int(ty), 0, lm_n - 1);
+    return lmap(lmap.bounds.x1 + xi, lmap.bounds.y1 + yi).y;
+  }
+  float3 cuc_px(int x, int y) {
+    float4 c = cuc(cuc.bounds.x1 + x, cuc.bounds.y1 + y);
+    return float3(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f));
+  }
+  // the cuc's colour at (lu, lv): bilinear; outside it dark, light or repeated
+  float3 cuc_at(float lu, float lv) {
+    float cu = 0.0f;
+    float cv = 0.0f;
+    if (light_type == 1) {
+      cu = lu * 0.5f + 0.5f;
+      cv = lv * 0.5f * cuc_aspect + 0.5f;
+    } else {
+      float sz = cuc_size / su;
+      cu = lu / sz + 0.5f;
+      cv = lv / sz * cuc_aspect + 0.5f;
+    }
+    if (cuc_outside != 2 && (cu < 0.0f || cu > 1.0f || cv < 0.0f || cv > 1.0f)) {
+      return float3(cuc_outside == 0 ? 0.0f : 1.0f);
+    }
+    int W = cuc.bounds.width();
+    int H = cuc.bounds.height();
+    float px = cu * float(W) - 0.5f;
+    float py = cv * float(H) - 0.5f;
+    float x0f = floor(px);
+    float y0f = floor(py);
+    float ax = px - x0f;
+    float ay = py - y0f;
+    int x0 = int(x0f);
+    int y0 = int(y0f);
+    int xa = 0;
+    int xb = 0;
+    int ya = 0;
+    int yb = 0;
+    if (cuc_outside == 2) {
+      xa = posmodi(x0, W);
+      xb = posmodi(x0 + 1, W);
+      ya = posmodi(y0, H);
+      yb = posmodi(y0 + 1, H);
+    } else {
+      xa = clampi(x0, 0, W - 1);
+      xb = clampi(x0 + 1, 0, W - 1);
+      ya = clampi(y0, 0, H - 1);
+      yb = clampi(y0 + 1, 0, H - 1);
+    }
+    return (cuc_px(xa, ya) * (1.0f - ax) + cuc_px(xb, ya) * ax) * (1.0f - ay) +
+           (cuc_px(xa, yb) * (1.0f - ax) + cuc_px(xb, yb) * ax) * ay;
+  }
+  // the cone's edge, distance falloff and fade along the light since it entered the set
+  float light_weight(float lu, float lv, float lt, float tx, float ty) {
+    float w = 1.0f;
+    if (light_type == 1) {
+      float r = sqrt(lu * lu + lv * lv);
+      float soft = max(cone_soft, 1e-4f);
+      w = 1.0f - smooth01((r - (1.0f - cone_soft)) / soft);
+      float dm = max(lt * su, 0.01f);
+      w = w * min(pow(light_dist / dm, 2.0f * falloff), 100.0f);
+    }
+    float te = entry_at(tx, ty);
+    float run = te < 5e19f ? max(lt - te, 0.0f) * su : 0.0f;
+    float ext = haze * @HAZE_K@ + (fade > 0.0f ? 1.0f / fade : 0.0f);
+    return w * exp(-run * ext);
+  }

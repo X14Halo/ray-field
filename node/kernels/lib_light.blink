@@ -1,0 +1,64 @@
+  // ---- the light (mirrors rayfield/lightmath.py)
+  // Needs params light_type aim light_az light_el roll distance cone su, and locals
+  // Lfwd Lright Lup Ltoward Lpos tanc (set by light_setup() in init()).
+  float3 kelvin_rgb(float K) {
+    float t = K / 100.0f;
+    float r = 255.0f;
+    float g = 0.0f;
+    float b = 255.0f;
+    if (t <= 66.0f) {
+      g = 99.4708025861f * log(t) - 161.1195681661f;
+    } else {
+      r = 329.698727446f * pow(t - 60.0f, -0.1332047592f);
+      g = 288.1221695283f * pow(t - 60.0f, -0.0755148492f);
+    }
+    if (t < 66.0f) {
+      if (t <= 19.0f) {
+        b = 0.0f;
+      } else {
+        b = 138.5177312231f * log(t - 10.0f) - 305.0447927307f;
+      }
+    }
+    float3 c = float3(pow(clamp(r, 0.0f, 255.0f) / 255.0f, 2.2f), pow(clamp(g, 0.0f, 255.0f) / 255.0f, 2.2f),
+                      pow(clamp(b, 0.0f, 255.0f) / 255.0f, 2.2f));
+    return c / (0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z);
+  }
+  // unit vector toward the light (Y up); heading 0 = the light travels toward +X
+  float3 light_dir(float az, float el) {
+    float a = az * 0.0174532925f;
+    float e = el * 0.0174532925f;
+    return float3(-cos(a) * cos(e), sin(e), -sin(a) * cos(e));
+  }
+  void light_setup() {
+    Ltoward = light_dir(light_az, light_el);
+    Lfwd = Ltoward * -1.0f;
+    float3 ref = fabs(Lfwd.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(0.0f, 0.0f, -1.0f);
+    float3 r0 = unit3(cross(Lfwd, ref));
+    float3 u0 = cross(r0, Lfwd);
+    float ca = cos(roll * 0.0174532925f);
+    float sa = sin(roll * 0.0174532925f);
+    Lright = r0 * ca + u0 * sa;
+    Lup = u0 * ca - r0 * sa;
+    Lpos = aim + Ltoward * (light_dist / su);
+    tanc = tan(clamp(cone, 1.0f, 170.0f) * 0.5f * 0.0174532925f);
+  }
+  // light-space coordinates of a world point: (lu, lv, lt, valid).
+  // sun: lu, lv across the light from the aim point (scene units), lt along it.
+  // spot: lu, lv in the cone (-1..1 at its edge), lt = distance from the light.
+  float4 light_coords(float3 X) {
+    if (light_type == 0) {
+      float3 q = X - aim;
+      return float4(dot(q, Lright), dot(q, Lup), dot(q, Lfwd), 1.0f);
+    }
+    float3 q = X - Lpos;
+    float z = dot(q, Lfwd);
+    if (z <= 1e-6f) {
+      return float4(0.0f, 0.0f, len3(q), 0.0f);
+    }
+    float zs = z * tanc;
+    return float4(dot(q, Lright) / zs, dot(q, Lup) / zs, len3(q), 1.0f);
+  }
+  // Henyey-Greenstein, 1 everywhere at g = 0
+  float hg(float c, float g) {
+    return (1.0f - g * g) / pow(max(1.0f + g * g - 2.0f * g * c, 1e-4f), 1.5f);
+  }

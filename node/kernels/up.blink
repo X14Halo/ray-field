@@ -1,0 +1,80 @@
+// RayField: the march's picture back at full resolution. Each pixel blends the nearby march pixels, weighted by how
+// close they are and by how close their depth is to this pixel's, so the atmosphere keeps the set's edges (and the
+// steps' random offsets average out). Mirrors reference.upsample.
+kernel RFUp : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> surf;
+  Image<eRead, eAccessRandom, eEdgeClamped> mar;
+  Image<eRead, eAccessRandom, eEdgeClamped> info;
+  Image<eWrite> dst;
+
+  param:
+//@decl
+
+  local:
+    float sxf;
+    float syf;
+
+  void define() {
+//@define
+  }
+
+//@params su
+//@include lib_math
+
+  void init() {
+    sxf = float(surf.bounds.width()) / float(mar.bounds.width());
+    syf = float(surf.bounds.height()) / float(mar.bounds.height());
+  }
+
+  float depth_at(int x, int y, float rch) {
+    float4 s = surf(surf.bounds.x1 + x, surf.bounds.y1 + y);
+    return (s.y >= 0.02f && s.x > 0.0f) ? min(s.x, rch) : rch;
+  }
+
+  void process(int2 xy) {
+    float rch = info(info.bounds.x1 + 1, info.bounds.y1).w;
+    int W = surf.bounds.width();
+    int H = surf.bounds.height();
+    int w = mar.bounds.width();
+    int h = mar.bounds.height();
+    int x = xy.x - surf.bounds.x1;
+    int y = xy.y - surf.bounds.y1;
+    float Dp = depth_at(x, y, rch);
+    float lx = (float(x) + 0.5f) / sxf - 0.5f;
+    float ly = (float(y) + 0.5f) / syf - 0.5f;
+    int i0 = int(floor(lx)) - 1;
+    int j0 = int(floor(ly)) - 1;
+    float4 acc = float4(0.0f);
+    float wsum = 0.0f;
+    float4 best = float4(0.0f);
+    float bestd = 1e30f;
+    float eps = 0.01f / su;
+    float isg = 1.0f / (0.85f * 0.85f);
+    for (int b = 0; b < 4; b++) {
+      for (int a = 0; a < 4; a++) {
+        int iu = i0 + a;
+        int ju = j0 + b;
+        int i = clampi(iu, 0, w - 1);
+        int j = clampi(ju, 0, h - 1);
+        int qx = clampi(int((float(i) + 0.5f) * sxf), 0, W - 1);
+        int qy = clampi(int((float(j) + 0.5f) * syf), 0, H - 1);
+        float Dq = depth_at(qx, qy, rch);
+        float ex = float(iu) - lx;
+        float ey = float(ju) - ly;
+        float ws = exp(-0.5f * (ex * ex + ey * ey) * isg);
+        float rel = (Dq - Dp) / (0.02f * Dp + eps);
+        float wt = ws * exp(-0.5f * rel * rel);
+        float4 m = mar(mar.bounds.x1 + i, mar.bounds.y1 + j);
+        acc += m * wt;
+        wsum += wt;
+        float dd = fabs(Dq - Dp);
+        if (dd < bestd) {
+          bestd = dd;
+          best = m;
+        }
+      }
+    }
+    dst() = wsum > 1e-4f ? acc / wsum : best;
+  }
+};

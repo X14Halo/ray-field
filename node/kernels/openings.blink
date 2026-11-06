@@ -1,0 +1,56 @@
+// RayField: how far away the openings are (windows, doors, gaps to the sky), at 1/8 of the frame's size. Where a
+// block shows surface, r = its depth (from the blocks image); where it shows only sky or the far outside, r is filled
+// in from the nearest blocks with surface around it (in 8 directions, weighted by 1 / distance), so it is roughly
+// the depth of the window's plane. g = 1 where r is known. The light map uses it to tell air outside a window
+// (beyond r: light there has come in through the opening) from air in front of it. Mirrors reference.openings.
+kernel RFOpenings : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> blocks;
+  Image<eWrite> dst;
+
+  local:
+    int w;
+    int h;
+
+  void define() {
+  }
+
+  void init() {
+    w = blocks.bounds.width();
+    h = blocks.bounds.height();
+  }
+
+  void process(int2 xy) {
+    int bx = blocks.bounds.x1;
+    int by = blocks.bounds.y1;
+    int cx = xy.x - bx;
+    int cy = xy.y - by;
+    float d = blocks(xy.x, xy.y).x;
+    if (d > 0.0f) {
+      dst() = float4(d, 1.0f, 0.0f, 0.0f);
+      return;
+    }
+    float acc = 0.0f;
+    float wsum = 0.0f;
+    for (int dir = 0; dir < 8; dir++) {
+      int dx = (dir == 0 || dir == 4 || dir == 5) ? 1 : ((dir == 1 || dir == 6 || dir == 7) ? -1 : 0);
+      int dy = (dir == 2 || dir == 4 || dir == 6) ? 1 : ((dir == 3 || dir == 5 || dir == 7) ? -1 : 0);
+      float stp = (dx != 0 && dy != 0) ? 1.41421356f : 1.0f;
+      for (int k = 1; k < 4096; k++) {
+        int x = cx + dx * k;
+        int y = cy + dy * k;
+        if (x < 0 || y < 0 || x >= w || y >= h) {
+          break;
+        }
+        float dd = blocks(bx + x, by + y).x;
+        if (dd > 0.0f) {
+          float wt = 1.0f / (float(k) * stp);
+          acc += dd * wt;
+          wsum += wt;
+          break;
+        }
+      }
+    }
+    dst() = wsum > 0.0f ? float4(acc / wsum, 1.0f, 0.0f, 0.0f) : float4(0.0f);
+  }
+};

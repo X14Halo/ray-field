@@ -1,0 +1,181 @@
+// RayField: the light map, the set as the light sees it. For each light-map pixel, the light ray through it is
+// marched through the set's box; a step that lands just behind a surface the camera sees (by less than Thickness)
+// is where something blocks the light. Out:
+//   r = how far the light gets along its ray before it is blocked (1e20 = it never is)
+//   g = where the ray enters the set's box (1e20 = it misses the set)
+//   b = 1 where light got into the set along this ray (through an opening, with 'Light only through openings')
+// Only the first lm_n x lm_n pixels are used (the rest are left empty).
+// Sun: lt is the distance along the light from the aim point's plane; spot: the distance from the light.
+// Mirrors reference.lightmap.
+kernel RFLightMap : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessPoint, eEdgeClamped> space;
+  Image<eRead, eAccessRandom, eEdgeClamped> surf;
+  Image<eRead, eAccessRandom, eEdgeClamped> info;
+  Image<eRead, eAccessRandom, eEdgeClamped> opn;
+  Image<eWrite> dst;
+
+  param:
+//@decl
+
+  local:
+    float Wf;
+    float Hf;
+    float3 Lfwd;
+    float3 Lright;
+    float3 Lup;
+    float3 Ltoward;
+    float3 Lpos;
+    float tanc;
+    float thick_su;
+    float bias;
+
+  void define() {
+//@define
+  }
+
+//@params cam_pos cam_right cam_up cam_back cam_th light_type aim light_az light_el roll light_dist cone su lm_n
+//@params lm_steps thick interior shadows
+//@include lib_math
+//@include lib_cam
+//@include lib_light
+
+  void init() {
+    Wf = float(surf.bounds.width());
+    Hf = float(surf.bounds.height());
+    light_setup();
+    thick_su = thick / su;
+    bias = 0.005f / su;
+  }
+
+  bool blocked(float3 X) {
+    float3 p = project_mid(X);
+    if (p.z <= 0.0f || p.x < 0.0f || p.y < 0.0f || p.x >= Wf || p.y >= Hf) {
+      return false;
+    }
+    float4 s = surf(surf.bounds.x1 + int(p.x), surf.bounds.y1 + int(p.y));
+    if (s.y < 0.5f || s.x <= 0.0f) {
+      return false;
+    }
+    float xd = len3(X - cam_pos);
+    return xd > s.x * 1.003f + bias && xd < s.x + thick_su;
+  }
+
+  void process(int2 xy) {
+    int fx0 = info.bounds.x1;
+    int fy0 = info.bounds.y1;
+    int x = xy.x - space.bounds.x1;
+    int y = xy.y - space.bounds.y1;
+    if (x >= lm_n || y >= lm_n || shadows == 1) {
+      dst() = float4(1e20f, 1e20f, 0.0f, 0.0f);
+      return;
+    }
+    float4 f0 = info(fx0, fy0);
+    float4 f1 = info(fx0 + 1, fy0);
+    float4 f2 = info(fx0 + 2, fy0);
+    float3 lo = float3(f0.x, f0.y, f0.z);
+    float3 hi = float3(f1.x, f1.y, f1.z);
+    float3 O = Lpos;
+    float3 D = Lfwd;
+    if (light_type == 0) {
+      float lu = f2.x + (float(x) + 0.5f) * f2.z;
+      float lv = f2.y + (float(y) + 0.5f) * f2.z;
+      O = aim + Lright * lu + Lup * lv;
+    } else {
+      float uu = (float(x) + 0.5f) / float(lm_n) * 2.0f - 1.0f;
+      float vv = (float(y) + 0.5f) / float(lm_n) * 2.0f - 1.0f;
+      D = unit3(Lfwd + Lright * (uu * tanc) + Lup * (vv * tanc));
+    }
+    // the set's box, padded a little
+    float pad = 0.01f * len3(hi - lo) + 0.01f / su;
+    float3 lo2 = lo - float3(pad);
+    float3 hi2 = hi + float3(pad);
+    float dx = fabs(D.x) < 1e-9f ? 1e-9f : D.x;
+    float dy = fabs(D.y) < 1e-9f ? 1e-9f : D.y;
+    float dz = fabs(D.z) < 1e-9f ? 1e-9f : D.z;
+    float ax = (lo2.x - O.x) / dx;
+    float bx = (hi2.x - O.x) / dx;
+    float ay = (lo2.y - O.y) / dy;
+    float by = (hi2.y - O.y) / dy;
+    float az = (lo2.z - O.z) / dz;
+    float bz = (hi2.z - O.z) / dz;
+    float tn = max(max(min(ax, bx), min(ay, by)), min(az, bz));
+    float tf = min(min(max(ax, bx), max(ay, by)), max(az, bz));
+    if (light_type == 1) {
+      tn = max(tn, 0.0f);
+    }
+    if (!(tf > tn)) {
+      dst() = float4(1e20f, 1e20f, 0.0f, 0.0f);
+      return;
+    }
+    // march to the first blocker, then narrow it down. With 'Light only through openings', light gets into the
+    // set once its ray has been outside an opening the camera sees (sky or the far outside, farther than the opening
+    // itself, from the openings image): a ray that reaches air the camera sees inside the set without having done so
+    // came through a wall or a roof the camera cannot see: no light gets in along it at all.
+    bool inside = light_type == 1 && Lpos.x > lo2.x && Lpos.y > lo2.y && Lpos.z > lo2.z && Lpos.x < hi2.x &&
+                  Lpos.y < hi2.y && Lpos.z < hi2.z;
+    bool open = interior == 0 || inside;
+    float rch = f1.w;
+    float t0 = tn;
+    if (!open) {
+      t0 = tn - (0.05f * len3(hi - lo) + thick_su);
+      if (light_type == 1) {
+        t0 = max(t0, 0.0f);
+      }
+    }
+    float ow = float(opn.bounds.width());
+    float oh = float(opn.bounds.height());
+    float dt = (tf - t0) / float(lm_steps);
+    float tb = 1e20f;
+    bool found = false;
+    for (int k = 0; k < lm_steps; k++) {
+      float t = t0 + (float(k) + 0.5f) * dt;
+      float3 X = O + D * t;
+      float3 p = project_mid(X);
+      if (p.z <= 0.0f || p.x < 0.0f || p.y < 0.0f || p.x >= Wf || p.y >= Hf) {
+        continue;
+      }
+      float4 sv = surf(surf.bounds.x1 + int(p.x), surf.bounds.y1 + int(p.y));
+      float xd = len3(X - cam_pos);
+      if (sv.y >= 0.5f && sv.x > 0.0f && xd > sv.x * 1.003f + bias && xd < sv.x + thick_su) {
+        tb = t;
+        found = true;
+        break;
+      }
+      if (!open) {
+        bool sky = sv.y <= 0.02f || sv.x <= 0.0f || sv.x > rch;
+        bool seen = sv.x > xd * 1.003f + bias;
+        if (sky) {
+          // the camera sees an opening here: beyond its depth is outside, in front of it is the room's air
+          float4 o = opn(opn.bounds.x1 + clampi(int(p.x * ow / Wf), 0, int(ow) - 1),
+                         opn.bounds.y1 + clampi(int(p.y * oh / Hf), 0, int(oh) - 1));
+          open = o.y < 0.5f || xd > o.x * 1.003f + bias;
+          seen = !open;
+        }
+        if (!open && seen) {
+          tb = t0;
+          break;
+        }
+      }
+    }
+    if (!open) {
+      // never came in through an opening (it may still cross a corner of the frame between two steps): dark
+      tb = t0;
+      found = false;
+    }
+    if (found) {
+      float a = max(tb - dt, t0);
+      float b = tb;
+      for (int it = 0; it < 5; it++) {
+        float m = 0.5f * (a + b);
+        if (blocked(O + D * m)) {
+          b = m;
+        } else {
+          a = m;
+        }
+      }
+      tb = b;
+    }
+    dst() = float4(tb, tn, open ? 1.0f : 0.0f, 0.0f);
+  }
+};

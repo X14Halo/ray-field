@@ -1,0 +1,45 @@
+// RayField: the frame at 1/8 of its size, for the openings: r = the farthest clean surface in each block of the
+// frame within the haze's reach, 0 where the block shows only sky or the far outside. Mirrors reference.blocks.
+kernel RFBlocks : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessPoint, eEdgeClamped> space;
+  Image<eRead, eAccessRandom, eEdgeClamped> surf;
+  Image<eRead, eAccessRandom, eEdgeClamped> info;
+  Image<eWrite> dst;
+
+  local:
+    int W;
+    int H;
+    int w;
+    int h;
+
+  void define() {
+  }
+
+  void init() {
+    W = surf.bounds.width();
+    H = surf.bounds.height();
+    w = space.bounds.width();
+    h = space.bounds.height();
+  }
+
+  void process(int2 xy) {
+    float rch = info(info.bounds.x1 + 1, info.bounds.y1).w;
+    int cx = xy.x - space.bounds.x1;
+    int cy = xy.y - space.bounds.y1;
+    int x0 = (cx * W) / w;
+    int x1 = max(((cx + 1) * W) / w, x0 + 1);
+    int y0 = (cy * H) / h;
+    int y1 = max(((cy + 1) * H) / h, y0 + 1);
+    float d = 0.0f;
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        float4 s = surf(surf.bounds.x1 + x, surf.bounds.y1 + y);
+        if (s.y >= 0.5f && s.x > 0.0f && s.x <= rch) {
+          d = max(d, s.x);
+        }
+      }
+    }
+    dst() = float4(d, 0.0f, 0.0f, 0.0f);
+  }
+};

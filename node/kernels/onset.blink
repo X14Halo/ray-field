@@ -1,0 +1,75 @@
+// RayField: the light on the set, to aim it: the light (with its shadows, cuc, cone and falloff) landing on every
+// surface the camera sees, times the surface's facing (from the normals), as on a grey card, plus a faint shading
+// so the set shows in shadow too. Mirrors reference.onset.
+kernel RFOnSet : ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> surf;
+  Image<eRead, eAccessRandom, eEdgeClamped> nrm;
+  Image<eRead, eAccessRandom, eEdgeClamped> info;
+  Image<eRead, eAccessRandom, eEdgeClamped> lmap;
+  Image<eRead, eAccessRandom, eEdgeClamped> cuc;
+  Image<eWrite> dst;
+
+  param:
+//@decl
+
+  local:
+    float Wf;
+    float Hf;
+    float3 Lfwd;
+    float3 Lright;
+    float3 Lup;
+    float3 Ltoward;
+    float3 Lpos;
+    float tanc;
+    float3 col;
+
+  void define() {
+//@define
+  }
+
+//@params cam_pos cam_right cam_up cam_back cam_th light_type aim light_az light_el roll light_dist cone su lm_n
+//@params cone_soft falloff light_k light_col haze fade use_cuc cuc_size cuc_aspect cuc_outside
+//@include lib_math
+//@include lib_cam
+//@include lib_light
+//@include lib_lighting
+
+  void init() {
+    Wf = float(surf.bounds.width());
+    Hf = float(surf.bounds.height());
+    light_setup();
+    col = light_col * kelvin_rgb(light_k);
+  }
+
+  void process(int2 xy) {
+    int x = xy.x - surf.bounds.x1;
+    int y = xy.y - surf.bounds.y1;
+    float4 s = surf(xy.x, xy.y);
+    if (s.y < 0.02f || s.x <= 0.0f) {
+      dst() = float4(0.0f, 0.0f, 0.0f, 1.0f);
+      return;
+    }
+    float4 f2 = info(info.bounds.x1 + 2, info.bounds.y1);
+    float3 lf = float3(f2.x, f2.y, f2.z);
+    float3 d = ray_dir(float(x) + 0.5f, float(y) + 0.5f);
+    float3 P = cam_pos + d * s.x;
+    float4 nv = nrm(nrm.bounds.x1 + x, nrm.bounds.y1 + y);
+    float3 n = float3(nv.x, nv.y, nv.z);
+    bool hasn = len3(n) > 0.1f;
+    float3 N = unit3(n);
+    float4 c = light_coords(P);
+    float2 tx = texel_of(c.x, c.y, lf);
+    float texel_su = light_type == 0 ? lf.z : c.z * 2.0f * tanc / float(lm_n);
+    float3 to = light_type == 0 ? Ltoward : unit3(Lpos - P);
+    float bias = 2.0f * texel_su + 0.02f / su;
+    float w = c.w > 0.0f ? shadow_at(tx.x, tx.y, c.z, bias) * light_weight(c.x, c.y, c.z, tx.x, tx.y) : 0.0f;
+    float3 cc = use_cuc == 1 ? cuc_at(c.x, c.y) : float3(1.0f);
+    float ndl = hasn ? max(dot(N, to), 0.0f) : 1.0f;
+    float3 light = col * cc * (w * ndl);
+    float lum = 0.2126f * col.x + 0.7152f * col.y + 0.0722f * col.z;
+    float shade = 0.012f * lum * (hasn ? 0.55f + 0.45f * N.y : 1.0f);
+    float3 o = light * 0.18f + float3(shade);
+    dst() = float4(o.x, o.y, o.z, 1.0f);
+  }
+};
